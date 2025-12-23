@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -31,14 +31,21 @@ type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 // Initialize Firebase with modular API
 const auth = getAuth(getApp());
 
-// Correct API URL for Android emulator
 const getApiUrl = () => {
-  if (__DEV__) {
-    return Platform.OS === 'android' 
-      ? 'http://10.0.2.2:5001/api/auth'  // Android emulator
-      : 'http://localhost:5001/api/auth'; // iOS simulator
+  // 1. If running on Android Emulator
+  if (Platform.OS === 'android') {
+    return 'http://10.0.2.2:5001/api'; 
   }
-  return 'https://eazygo-backend.onrender.com/api/auth';
+  
+  // 2. If running on iOS Simulator
+  if (Platform.OS === 'ios') {
+    return 'http://localhost:5001/api';
+  }
+
+  // 3. If running on a Physical Device (Update this with your PC's IP)
+  // return 'http://192.168.1.XX:5001/api'; 
+  
+  return 'http://10.0.2.2:5001/api'; // Default fallback
 };
 
 const API_URL = getApiUrl();
@@ -115,10 +122,17 @@ const LoginScreen = () => {
     return () => clearInterval(timer);
   }, [resendCountdown]);
 
-  const isValidPhoneNumber = useCallback((phone: string) => /^[6-9]\d{9}$/.test(phone), []);
+  const isValidPhoneNumber = (phone: string) => /^[6-9]\d{9}$/.test(phone);
 
-  // STEP 1: Check if driver exists and send Firebase OTP
-  const sendOTP = useCallback(async (phone: string) => {
+  // Function to clean phone number
+  const cleanPhoneNumber = (phone: string) => {
+    return phone.replace('+91', '').replace(/\D/g, '');
+  };
+
+  // ✅ FIXED: Send OTP function
+  const sendOTP = async () => {
+    const phone = mobileNumber.trim();
+    
     if (!phone) {
       Alert.alert('Error', 'Please enter your mobile number.');
       return;
@@ -134,13 +148,16 @@ const LoginScreen = () => {
       console.log(`📞 Checking driver: ${phone}`);
       console.log(`🌐 API URL: ${API_URL}`);
       
-      // STEP 1A: Check if driver exists in MongoDB
+      // Clean phone number for database query
+      const cleanPhone = cleanPhoneNumber(phone);
+      
       try {
+        // ✅ CORRECT ENDPOINT: Check if driver exists
         const checkResponse = await axios.post(
-          `${API_URL}/request-driver-otp`, 
-          { phoneNumber: phone },
+          `${API_URL}/drivers/driver-verify-phone`,  // ✅ THIS IS THE CORRECT ENDPOINT
+          { phoneNumber: cleanPhone },
           { 
-            timeout: 8000, // Increased timeout
+            timeout: 8000,
             headers: {
               'Content-Type': 'application/json',
               'Accept': 'application/json'
@@ -150,10 +167,47 @@ const LoginScreen = () => {
         
         console.log('📋 Driver check response:', checkResponse.data);
         
-        if (checkResponse.data.success) {
-          console.log(`✅ Driver found: ${checkResponse.data.driverId}`);
+        if (checkResponse.data.success && checkResponse.data.driver) {
+          console.log(`✅ Driver found: ${checkResponse.data.driver.driverId}`);
+          
+          // Save driver info to AsyncStorage
+          await AsyncStorage.multiSet([
+            ['driverId', checkResponse.data.driver.driverId],
+            ['driverName', checkResponse.data.driver.name],
+            ['driverVehicleType', checkResponse.data.driver.vehicleType || 'taxi'],
+            ['vehicleNumber', checkResponse.data.driver.vehicleNumber || 'N/A'],
+            ['driverInfo', JSON.stringify(checkResponse.data.driver)],
+            ['phoneNumber', cleanPhone],
+          ]);
+          
+          // Now send Firebase OTP
+          console.log(`🔥 Sending Firebase OTP to: +91${cleanPhone}`);
+          const formattedPhone = `+91${cleanPhone}`;
+          
+          try {
+            const confirmation = await signInWithPhoneNumber(auth, formattedPhone);
+            
+            setVerificationId(confirmation.verificationId);
+            await AsyncStorage.setItem('verificationId', confirmation.verificationId);
+            
+            Alert.alert('OTP Sent', `OTP has been sent to ${phone}. Please check your messages.`);
+            setOtpSent(true);
+            setResendCountdown(30);
+            
+          } catch (firebaseError: any) {
+            console.error('❌ Firebase OTP error:', firebaseError);
+            
+            if (firebaseError.code === 'auth/invalid-phone-number') {
+              Alert.alert('Invalid Phone', 'Please enter a valid phone number.');
+            } else if (firebaseError.code === 'auth/too-many-requests') {
+              Alert.alert('Too Many Attempts', 'Please try again later.');
+            } else {
+              Alert.alert('Error', firebaseError.message || 'Failed to send OTP. Please try again.');
+            }
+          }
+          
         } else {
-          // Driver not found - show professional alert
+          // Driver not found
           Alert.alert(
             'Authentication Failed',
             'This mobile number is not registered in our system. Please contact our admin at eazygo2026@gmail.com',
@@ -165,72 +219,31 @@ const LoginScreen = () => {
               { text: 'OK', style: 'cancel' }
             ]
           );
-          return;
         }
-      } catch (error: any) {
-        console.log('⚠️ Backend check error:', error.message);
         
-        if (error.response?.status === 404) {
-          // Driver not found - show professional alert
+      } catch (backendError: any) {
+        console.error('❌ Backend check error:', backendError.message);
+        
+        if (backendError.response?.status === 404) {
+          // Driver not found in database
           Alert.alert(
-            'Authentication Failed',
-            'This mobile number is not registered in our system. Please contact our admin at eazygo2026@gmail.com',
+            'Driver Not Found',
+            'This phone number is not registered as a driver. Please contact admin.',
             [
               { 
                 text: 'Contact Admin', 
-                onPress: () => Linking.openURL('mailto:eazygo2026@gmail.com?subject=Driver Registration Issue')
+                onPress: () => Linking.openURL('mailto:eazygo2026@gmail.com')
               },
-              { text: 'OK', style: 'cancel' }
+              { text: 'OK' }
             ]
           );
-          return;
-        }
-        
-        // If backend is down, we'll still try Firebase but warn user
-        Alert.alert(
-          'Network Warning',
-          'Cannot reach our servers. Will try to send OTP via Firebase.',
-          [{ text: 'Continue' }]
-        );
-        console.log('⚠️ Backend unavailable, proceeding with Firebase...');
-      }
-      
-      // STEP 1B: Send Firebase OTP using modular API
-      try {
-        console.log(`🔥 Sending Firebase OTP to: +91${phone}`);
-        
-        const formattedPhone = `+91${phone}`;
-        
-        // Send OTP using modular Firebase API
-        const confirmation = await signInWithPhoneNumber(auth, formattedPhone);
-        
-        setVerificationId(confirmation.verificationId);
-        await AsyncStorage.setItem('verificationId', confirmation.verificationId);
-        await AsyncStorage.setItem('phoneNumber', phone);
-        
-        // Show success alert
-        Alert.alert(
-          'OTP Sent',
-          `OTP has been sent to ${phone}. Please check your messages.`,
-          [{ text: 'OK' }]
-        );
-        
-        setOtpSent(true);
-        setResendCountdown(30);
-        
-      } catch (firebaseError: any) {
-        console.error('❌ Firebase OTP error:', firebaseError);
-        
-        if (firebaseError.code === 'auth/invalid-phone-number') {
-          Alert.alert('Invalid Phone', 'Please enter a valid phone number.');
-        } else if (firebaseError.code === 'auth/too-many-requests') {
-          Alert.alert('Too Many Attempts', 'Please try again later.');
-        } else if (firebaseError.code === 'auth/quota-exceeded') {
-          Alert.alert('Quota Exceeded', 'SMS quota exceeded. Please try again later.');
-        } else if (firebaseError.code === 'auth/captcha-check-failed') {
-          Alert.alert('Captcha Failed', 'Please try again.');
         } else {
-          Alert.alert('Error', firebaseError.message || 'Failed to send OTP. Please try again.');
+          // Other backend errors
+          Alert.alert(
+            'Network Error',
+            'Cannot reach our servers. Please try again later.',
+            [{ text: 'OK' }]
+          );
         }
       }
       
@@ -240,121 +253,139 @@ const LoginScreen = () => {
     } finally {
       setLoading(false);
     }
-  }, [isValidPhoneNumber]);
+  };
 
-  // STEP 2: Verify Firebase OTP and get driver data
-  const verifyOTP = useCallback(async () => {
-    console.log('🔍 verifyOTP called with:', { 
-      code, 
-      verificationId: verificationId ? 'exists' : 'null',
-      mobileNumber 
-    });
+
+  
+  // ✅ FIXED: Verify OTP function
+const verifyOTP = async () => {
+  const phone = mobileNumber.trim();
+  
+  if (!code) {
+    Alert.alert('Error', 'Please enter OTP.');
+    return;
+  }
+
+  if (!verificationId) {
+    Alert.alert('Error', 'No OTP session found. Please request a new OTP.');
+    return;
+  }
+
+  try {
+    setLoading(true);
+    console.log('1️⃣ Starting OTP verification for:', phone);
     
-    if (!code) {
-      Alert.alert('Error', 'Please enter OTP.');
-      return;
-    }
-
-    if (!verificationId) {
-      Alert.alert('Error', 'No OTP session found. Please request a new OTP.');
-      return;
-    }
-
+    // 1. Verify with Firebase
+    console.log('2️⃣ Verifying Firebase OTP...');
+    const credential = PhoneAuthProvider.credential(verificationId, code);
+    const userCredential = await signInWithCredential(auth, credential);
+    
+    console.log('✅ Firebase authentication successful');
+    console.log('Firebase UID:', userCredential.user.uid);
+    
+    // 2. Get complete driver data
+    const cleanPhone = cleanPhoneNumber(phone);
+    console.log(`3️⃣ Getting driver data for: ${cleanPhone}`);
+    console.log(`API URL: ${API_URL}/drivers/complete-driver-login`);
+    
     try {
-      setLoading(true);
-      console.log(`🔐 Verifying OTP: ${code}`);
-
-      // STEP 2A: Verify with Firebase ONLY using modular API
-      const credential = PhoneAuthProvider.credential(verificationId, code);
-      const userCredential = await signInWithCredential(auth, credential);
-      
-      console.log('✅ Firebase verification successful:', userCredential.user.uid);
-
-      // STEP 2B: Get driver info from backend
-      console.log(`📞 Getting driver info for: ${mobileNumber}`);
-      console.log(`🌐 API URL: ${API_URL}`);
-      
-      try {
-        const response = await axios.post(
-          `${API_URL}/get-driver-info`,
-          { phoneNumber: mobileNumber },
-          { 
-            timeout: 10000,
-            headers: {
-              'Content-Type': 'application/json'
-            }
+      const response = await axios.post(
+        `${API_URL}/drivers/complete-driver-login`,
+        { phoneNumber: cleanPhone },
+        { 
+          timeout: 15000,
+          headers: {
+            'Content-Type': 'application/json',
           }
-        );
-
-        console.log('📋 Driver info response:', response.data);
-
-        if (response.data.success) {
-          const driverInfo = response.data.driver;
-          
-          // Save everything to AsyncStorage
-          await AsyncStorage.multiSet([
-            ['authToken', response.data.token],
-            ['driverInfo', JSON.stringify(driverInfo)],
-            ['phoneNumber', mobileNumber],
-            ['firebaseUid', userCredential.user.uid],
-            // Store individual fields for backward compatibility
-            ['driverId', driverInfo.driverId || ''],
-            ['driverName', driverInfo.name || ''],
-            ['vehicleType', driverInfo.vehicleType || 'taxi'],
-            ['vehicleNumber', driverInfo.vehicleNumber || 'N/A'],
-          ]);
-
-          // Clear verification session
-          await AsyncStorage.removeItem('verificationId');
-
-          console.log('✅ Driver authenticated successfully');
-
-          // Navigate to Screen1 with driverInfo as param
-          navigation.reset({
-            index: 0,
-            routes: [
-              {
-                name: 'Screen1',
-                params: {
-                  driverInfo: driverInfo,
-                },
-              },
-            ],
-          });
-        } else {
-          throw new Error(response.data.message || 'Driver data not found after Firebase auth');
         }
+      );
+
+      console.log('📋 Backend response received:', {
+        status: response.status,
+        success: response.data?.success,
+        hasToken: !!response.data?.token,
+        driverId: response.data?.driver?.driverId,
+        fullResponse: response.data
+      });
+
+      if (response.data?.success) {
+        const driverInfo = response.data.driver;
+        const token = response.data.token;
         
-      } catch (backendError: any) {
-        console.error('❌ Backend error after Firebase auth:', backendError);
+        console.log('✅ Backend login successful:', {
+          driverId: driverInfo.driverId,
+          name: driverInfo.name,
+          tokenLength: token?.length || 0
+        });
         
-        // Even if backend fails, we can proceed with minimal data
-        const minimalDriver = {
-          driverId: 'temp-' + mobileNumber,
-          name: 'Driver',
-          phone: mobileNumber,
-          vehicleType: 'Unknown',
-          vehicleNumber: 'N/A',
-          status: 'Live',
-          wallet: 0
-        };
+        // Save everything to AsyncStorage
+        await AsyncStorage.multiSet([
+          ['authToken', token || ''],
+          ['driverInfo', JSON.stringify(driverInfo)],
+          ['phoneNumber', cleanPhone],
+          ['firebaseUid', userCredential.user.uid],
+          ['driverId', driverInfo.driverId || ''],
+          ['driverName', driverInfo.name || ''],
+          ['driverVehicleType', driverInfo.vehicleType || 'taxi'],
+          ['vehicleNumber', driverInfo.vehicleNumber || 'N/A'],
+        ]);
+
+        // Verify storage
+        const storedToken = await AsyncStorage.getItem('authToken');
+        console.log('💾 Token stored successfully:', storedToken?.substring(0, 20) + '...');
+
+        // Clear verification session
+        await AsyncStorage.removeItem('verificationId');
+        setVerificationId(null);
+
+        console.log('✅ All data saved, navigating to Screen1...');
+        
+        // Navigate to Screen1
+        navigation.reset({
+          index: 0,
+          routes: [
+            {
+              name: 'Screen1',
+              params: {
+                driverInfo: driverInfo,
+              },
+            },
+          ],
+        });
+        
+      } else {
+        console.error('❌ Backend response indicates failure:', response.data);
+        throw new Error(response.data?.message || 'Login failed');
+      }
+      
+    } catch (backendError: any) {
+      console.error('❌ Backend API error:', {
+        message: backendError.message,
+        response: backendError.response?.data,
+        status: backendError.response?.status,
+        url: backendError.config?.url
+      });
+      
+      // Try using stored driver info as fallback
+      const storedDriverInfo = await AsyncStorage.getItem('driverInfo');
+      
+      if (storedDriverInfo) {
+        console.log('🔄 Using stored driver info as fallback');
+        const driverInfo = JSON.parse(storedDriverInfo);
+        
+        // Create temporary token
+        const tempToken = `temp-${Date.now()}-${driverInfo.driverId}`;
         
         await AsyncStorage.multiSet([
-          ['authToken', 'firebase-temp-token-' + Date.now()],
-          ['driverInfo', JSON.stringify(minimalDriver)],
-          ['phoneNumber', mobileNumber],
+          ['authToken', tempToken],
           ['firebaseUid', userCredential.user.uid],
-          ['driverId', minimalDriver.driverId],
-          ['driverName', minimalDriver.name],
-          ['vehicleType', minimalDriver.vehicleType],
-          ['vehicleNumber', minimalDriver.vehicleNumber],
         ]);
 
         await AsyncStorage.removeItem('verificationId');
 
         Alert.alert(
-          'Logged In',
-          'Logged in with Firebase authentication.',
+          'Logged In (Limited Mode)',
+          'Logged in with limited functionality. Server connection issue.',
           [
             {
               text: 'Continue',
@@ -364,7 +395,7 @@ const LoginScreen = () => {
                   routes: [
                     {
                       name: 'Screen1',
-                      params: { driverInfo: minimalDriver },
+                      params: { driverInfo: driverInfo },
                     },
                   ],
                 });
@@ -372,27 +403,40 @@ const LoginScreen = () => {
             }
           ]
         );
-      }
-      
-    } catch (error: any) {
-      console.error('❌ OTP verification error:', error);
-      
-      if (error.code === 'auth/invalid-verification-code') {
-        Alert.alert('Invalid OTP', 'The OTP you entered is incorrect. Please try again.');
-      } else if (error.code === 'auth/code-expired') {
-        Alert.alert('OTP Expired', 'The OTP has expired. Please request a new one.');
-      } else if (error.code === 'auth/too-many-requests') {
-        Alert.alert('Too Many Attempts', 'Please try again later.');
       } else {
-        Alert.alert('Verification Failed', error.message || 'Failed to verify OTP.');
+        Alert.alert(
+          'Login Error',
+          'Could not retrieve driver information. Please try again.',
+          [{ text: 'OK' }]
+        );
       }
-      
-      // Clear OTP field on error
-      setCode('');
-    } finally {
-      setLoading(false);
     }
-  }, [code, mobileNumber, navigation, verificationId]);
+    
+  } catch (firebaseError: any) {
+    console.error('❌ Firebase verification error:', {
+      code: firebaseError.code,
+      message: firebaseError.message,
+      stack: firebaseError.stack
+    });
+    
+    if (firebaseError.code === 'auth/invalid-verification-code') {
+      Alert.alert('Invalid OTP', 'The OTP you entered is incorrect. Please try again.');
+    } else if (firebaseError.code === 'auth/code-expired') {
+      Alert.alert('OTP Expired', 'The OTP has expired. Please request a new one.');
+    } else if (firebaseError.code === 'auth/too-many-requests') {
+      Alert.alert('Too Many Attempts', 'Please try again later.');
+    } else {
+      Alert.alert('Verification Failed', firebaseError.message || 'Failed to verify OTP.');
+    }
+    
+    setCode('');
+  } finally {
+    setLoading(false);
+  }
+};
+
+
+
 
   return (
     <LinearGradient
@@ -477,7 +521,7 @@ const LoginScreen = () => {
                   
                   <TouchableOpacity
                     style={styles.resendButton}
-                    onPress={() => sendOTP(mobileNumber)}
+                    onPress={sendOTP}
                     disabled={loading || !resendAvailable}
                   >
                     <Text style={[
@@ -491,7 +535,7 @@ const LoginScreen = () => {
               ) : (
                 <TouchableOpacity 
                   style={[styles.button, loading && styles.buttonDisabled]} 
-                  onPress={() => sendOTP(mobileNumber)} 
+                  onPress={sendOTP} 
                   disabled={loading}
                 >
                   {loading ? (
@@ -612,7 +656,6 @@ const styles = StyleSheet.create({
 });
 
 export default LoginScreen;
-
 
 
 
