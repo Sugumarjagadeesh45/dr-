@@ -4151,82 +4151,107 @@ const startLocationUpdates = useCallback(() => {
 
 
 
-
-
-  // In Screen1.tsx - Replace your existing acceptRide function with this:
-
   const acceptRide = async (rideId?: string) => {
     const currentRideId = rideId || ride?.rideId;
-    if (!currentRideId) return;
-
-    // ✅ FIX 1: Prevent multiple simultaneous acceptances
-    if (isAccepting) {
-      console.log('⏭️ Already accepting a ride, ignoring duplicate button tap');
+    if (!currentRideId) {
+      Alert.alert("Error", "No ride ID available. Please try again.");
       return;
     }
-
-    // ✅ FIX 2: Prevent accepting the same ride twice
-    if (pendingAcceptRideId === currentRideId) {
-      console.log(`⏭️ Already accepting ride ${currentRideId}, ignoring duplicate`);
-      return;
-    }
-
+   
     if (!driverId) {
       Alert.alert("Error", "Driver not properly registered.");
       return;
     }
-
-    console.log(`🎯 DRIVER ACCEPTING RIDE: ${currentRideId}`);
-    
-    // ✅ SET LOCK STATE
-    setIsAccepting(true);
-    setPendingAcceptRideId(currentRideId);
-    
-    // ✅ CLEAR STATE to prevent UI overlap
-    setRide(null);
-    setRideStatus("idle");
-    setIsLoading(true);
-
-    // ✅ EMIT EVENT ONLY ONCE
-    if (socket) {
-      socket.emit("acceptRide", { 
-        rideId: currentRideId, 
-        driverId: driverId, 
-        driverName: driverName 
-      }, (response: any) => {
-        console.log('📨 Backend response to acceptRide:', response);
-        
-        // ✅ UNLOCK STATE
-        setIsAccepting(false);
-        setPendingAcceptRideId(null);
-        setIsLoading(false);
-        
-        if (response && response.success) {
-          console.log('✅ Ride accepted successfully');
-          // UI will update automatically via socket event
-        } else {
-          console.log('❌ Accept failed:', response?.message);
-          
-          Alert.alert(
-            "Acceptance Failed",
-            response?.message || "Ride is no longer available",
-            [
-              {
-                text: "OK",
-                onPress: () => {
-                  // Ensure we reset to a clean state after acknowledging error
-                  setRideStatus("idle");
-                  setRide(null);
-                }
-              }
-            ]
-          );
-        }
+   
+    if (socket && !socket.connected) {
+      Alert.alert("Connection Error", "Reconnecting to server...");
+      socket.connect();
+      socket.once("connect", () => {
+        setTimeout(() => acceptRide(currentRideId), 1000);
       });
+      return;
+    }
+   
+    setIsLoading(true);
+    setRideStatus("accepted");
+    setDriverStatus("onRide");
+   
+    if (socket) {
+      socket.emit(
+        "acceptRide",
+        {
+          rideId: currentRideId,
+          driverId: driverId,
+          driverName: driverName,
+        },
+        async (response: any) => {
+          setIsLoading(false);
+          if (!isMounted.current) return;
+         
+          if (response && response.success) {
+            // Use the enhanced passenger data function
+            const passengerData = fetchPassengerData(ride!);
+            if (passengerData) {
+              setUserData(passengerData);
+              console.log("✅ Passenger data set:", passengerData);
+            }
+            
+            const initialUserLocation = {
+              latitude: response.pickup.lat,
+              longitude: response.pickup.lng,
+            };
+           
+            setUserLocation(initialUserLocation);
+           
+            // Generate dynamic route from driver to pickup (GREEN ROUTE)
+            if (location) {
+              try {
+                const pickupRoute = await fetchRoute(location, initialUserLocation);
+                if (pickupRoute) {
+                  setRide((prev) => {
+                    if (!prev) return null;
+                    console.log("✅ Driver to pickup route generated with", pickupRoute.length, "points");
+                    return { ...prev, routeCoords: pickupRoute };
+                  });
+                }
+              } catch (error) {
+                console.error("❌ Error generating pickup route:", error);
+              }
+            
+              animateToLocation(initialUserLocation, true);
+            }
+            
+            // DEFAULT TO MAXIMIZED VIEW - Show rider details automatically when ride is accepted
+            setRiderDetailsVisible(true);
+            slideAnim.setValue(0);
+            fadeAnim.setValue(1);
+            
+            // Emit event to notify other drivers that this ride has been taken
+            socket.emit("rideTakenByDriver", {
+              rideId: currentRideId,
+              driverId: driverId,
+              driverName: driverName,
+            });
+            
+            socket.emit("driverAcceptedRide", {
+              rideId: currentRideId,
+              driverId: driverId,
+              userId: response.userId,
+              driverLocation: location,
+            });
+           
+            setTimeout(() => {
+              socket.emit("getUserDataForDriver", { rideId: currentRideId });
+            }, 1000);
+            
+            // Save ride state after accepting
+            saveRideState();
+          }
+        }
+      );
     }
   };
-
-
+  
 
   // Throttled pickup route update
   const throttledUpdatePickupRoute = useCallback(() => {
@@ -4454,15 +4479,20 @@ const startLocationUpdates = useCallback(() => {
     }
   }, [location]);
   
-  const confirmOTP = async () => {
-    if (!ride) return;
-   
-    if (!ride.otp) {
-      Alert.alert("Error", "OTP not yet received. Please wait...");
-      return;
-    }
-   
-    if (enteredOtp === ride.otp) {
+const confirmOTP = async () => {
+  if (!ride) return;
+  
+  // Generate OTP from customer ID (last 4 digits)
+  const customerId = ride.customerId || ride.userId || "0000";
+  const correctOtp = customerId.slice(-4);
+  
+  console.log("🔐 OTP Verification:", {
+    entered: enteredOtp,
+    correct: correctOtp,
+    customerId: customerId
+  });
+  
+  if (enteredOtp === correctOtp) {
       setTravelledKm(0);
       distanceSinceOtp.current = 0;
       lastLocationBeforeOtp.current = location;
@@ -4525,67 +4555,50 @@ const startLocationUpdates = useCallback(() => {
     }
   };
   
+
+  
+
   const completeRide = async () => {
-    if (!ride || !location || !otpVerificationLocation) return;
-   
-    stopNavigation();
-   
-    try {
-      // FIXED: Calculate distance between OTP verification location and current location
-      const distance = haversine(otpVerificationLocation, location) / 1000; // in km
-      
-      // Calculate fare based on distance and admin-set rate
-      const farePerKm = ride.fare || 15; // Default to 15 if not set
-      const finalFare = distance * farePerKm;
-     
-      console.log(`💰 CORRECT Final fare calculation:`);
-      console.log(`📍 OTP Verification Location: ${otpVerificationLocation.latitude.toFixed(6)}, ${otpVerificationLocation.longitude.toFixed(6)}`);
-      console.log(`📍 Current Location: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`);
-      console.log(`📏 Distance: ${distance.toFixed(2)}km`);
-      console.log(`💰 Rate per km: ₹${farePerKm}`);
-      console.log(`💰 Final Fare: ₹${finalFare.toFixed(2)}`);
-     
-      setBillDetails({
-        distance: `${distance.toFixed(2)} km`,
-        travelTime: `${Math.round(distance * 10)} mins`,
-        charge: Math.round(finalFare),
-        userName: userData?.name || 'Customer',
-        userMobile: userData?.mobile || 'N/A',
-        baseFare: 0, // No base fare as per requirement
-        timeCharge: 0, // No time charge as per requirement
-        tax: 0 // No tax as per requirement
+  if (!ride || !location || !otpVerificationLocation) return;
+  
+  stopNavigation();
+  
+  try {
+    // Calculate distance and fare
+    const distance = haversine(otpVerificationLocation, location) / 1000;
+    const farePerKm = ride.fare || 15;
+    const finalFare = distance * farePerKm;
+    
+    // Emit completion event
+    if (socket) {
+      socket.emit("driverCompletedRide", {
+        rideId: ride.rideId,
+        driverId: driverId,
+        userId: userData?.userId,
+        distance: distance,
+        fare: finalFare,
+        actualPickup: otpVerificationLocation,
+        actualDrop: location
       });
-     
-      setShowBillModal(true);
-     
-      if (socket) {
-        socket.emit("driverCompletedRide", {
-          rideId: ride.rideId,
-          driverId: driverId,
-          userId: userData?.userId,
-          distance: distance,
-          fare: finalFare,
-          // Send actual pickup and drop locations for billing
-          actualPickup: otpVerificationLocation,
-          actualDrop: location
-        });
-       
-        socket.emit("completeRide", {
-          rideId: ride.rideId,
-          driverId,
-          distance: distance,
-          fare: finalFare,
-          // Send actual pickup and drop locations for billing
-          actualPickup: otpVerificationLocation,
-          actualDrop: location
-        });
-      }
-     
-    } catch (error) {
-      console.error("❌ Error completing ride:", error);
-      Alert.alert("Error", "Failed to complete ride. Please try again.");
     }
-  };
+    
+    // Show local bill modal
+    setBillDetails({
+      distance: `${distance.toFixed(2)} km`,
+      travelTime: `${Math.round(distance * 10)} mins`,
+      charge: Math.round(finalFare),
+      userName: userData?.name || 'Customer',
+      userMobile: userData?.mobile || 'N/A'
+    });
+    setShowBillModal(true);
+    
+  } catch (error) {
+    console.error("Error completing ride:", error);
+    Alert.alert("Error", "Failed to complete ride. Please try again.");
+  }
+};
+
+
 
 
   // Update socket event handler for newRideRequest
