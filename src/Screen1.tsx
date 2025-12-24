@@ -6657,14 +6657,17 @@ const handleNotificationRideRequest = useCallback(async (data: any) => {
 
   console.log('🔔 Processing notification ride request:', data.rideId);
 
-  // ✅ FIX: Get driver type and compare case-insensitively
+  // ✅ FIX: Normalize both types to UPPERCASE for comparison
   const storedType = await AsyncStorage.getItem("driverVehicleType");
-  const driverType = (storedType || "taxi").toUpperCase();
-  const requestType = (data.vehicleType || "").toUpperCase();
+  const myDriverType = (storedType || "taxi").trim().toUpperCase(); 
+  const requestVehicleType = (data.vehicleType || "").trim().toUpperCase();
 
-  if (requestType && driverType && requestType !== driverType) {
-     console.log(`🚫 Ignoring notification: Driver is ${driverType}, ride is ${requestType}`);
-     return;
+  console.log(`🔍 Type Check (FCM): Me=[${myDriverType}] vs Ride=[${requestVehicleType}]`);
+
+  // Only ignore if the types are definitely different
+  if (requestVehicleType && myDriverType && myDriverType !== requestVehicleType) {
+      console.log(`🚫 Ignoring notification: Driver is ${myDriverType}, ride requires ${requestVehicleType}`);
+      return;
   }
   // Use the same logic as the socket ride request handler
   try {
@@ -6801,7 +6804,10 @@ const loadDriverInfo = async () => {
       // Store vehicle type if available
       if (storedVehicleType) {
         console.log(`🚗 Driver vehicle type: ${storedVehicleType}`);
-        await AsyncStorage.setItem("driverVehicleType", storedVehicleType);
+        const normalizedType = storedVehicleType.toUpperCase();
+      console.log(`🚗 Driver vehicle type loaded: ${normalizedType}`);
+      await AsyncStorage.setItem("driverVehicleType", normalizedType);
+   
       } else {
         // Default to 'taxi' if not set
         console.log("⚠️ No vehicle type found, defaulting to 'taxi'");
@@ -7303,39 +7309,42 @@ const startLocationUpdates = useCallback(() => {
     [userLocation, location]
   );
   
-  // Start navigation (called after OTP verification) - FIXED FOR REAL-TIME UPDATES
-  const startNavigation = useCallback(async () => {
-    if (!ride?.drop) return;
-    console.log("🚀 Starting navigation from OTP verification location to drop location");
-  
-    try {
-      // Use OTP verification location as starting point instead of original pickup
-      const routeCoords = await fetchRoute(otpVerificationLocation || location, ride.drop);
-      if (routeCoords && routeCoords.length > 0) {
-        console.log("✅ Navigation route fetched successfully:", routeCoords.length, "points");
+
+  // ✅ FIX: Accept startLocation as an argument
+const startNavigation = useCallback(async (startLocation: LocationType) => {
+  if (!ride?.drop || !startLocation) return;
+  console.log("🚀 Starting navigation from verified location to drop");
+
+  try {
+    // Use the passed startLocation directly
+    const routeCoords = await fetchRoute(startLocation, ride.drop);
+    
+    if (routeCoords && routeCoords.length > 0) {
+      console.log("✅ Navigation route fetched successfully:", routeCoords.length, "points");
+
+      setFullRouteCoords(routeCoords);
+      setVisibleRouteCoords(routeCoords);
+
+      // Start periodic route re-fetching
+      if (navigationInterval.current) clearInterval(navigationInterval.current);
       
-        setFullRouteCoords(routeCoords);
-        setVisibleRouteCoords(routeCoords);
-      
-        // Start periodic route re-fetching for real-time updates (every 10 seconds)
-        if (navigationInterval.current) clearInterval(navigationInterval.current);
-        navigationInterval.current = setInterval(async () => {
-          if (rideStatus === "started" && location) {
-            console.log("🔄 Re-fetching optimized route from current location to drop");
-            const updatedRoute = await fetchRoute(location, ride.drop);
-            if (updatedRoute && updatedRoute.length > 0) {
-              setFullRouteCoords(updatedRoute);
-              setVisibleRouteCoords(updatedRoute);
-            }
+      navigationInterval.current = setInterval(async () => {
+        if (rideStatus === "started" && location) {
+          console.log("🔄 Re-fetching optimized route from current location");
+          const updatedRoute = await fetchRoute(location, ride.drop);
+          if (updatedRoute && updatedRoute.length > 0) {
+            setFullRouteCoords(updatedRoute);
+            setVisibleRouteCoords(updatedRoute);
           }
-        }, 10000); // Re-fetch every 10 seconds
-      
-        console.log("🗺️ Navigation started with real-time route updates from current location to drop");
-      }
-    } catch (error) {
-      console.error("❌ Error starting navigation:", error);
+        }
+      }, 10000); 
+
+      console.log("🗺️ Navigation started with real-time route updates");
     }
-  }, [ride?.drop, fetchRoute, otpVerificationLocation, location, rideStatus]);
+  } catch (error) {
+    console.error("❌ Error starting navigation:", error);
+  }
+}, [ride?.drop, fetchRoute, location, rideStatus]);
   
   // Stop navigation
   const stopNavigation = useCallback(() => {
@@ -7431,76 +7440,97 @@ const startLocationUpdates = useCallback(() => {
     }
   }, [location]);
   
- const confirmOTP = async () => {
-    if (!ride) return;
-   
-    if (!ride.otp) {
-      Alert.alert("Error", "OTP not yet received. Please wait...");
-      return;
-    }
-   
-    if (enteredOtp === ride.otp) {
-      setTravelledKm(0);
-      distanceSinceOtp.current = 0;
-      lastLocationBeforeOtp.current = location;
-     
-      // IMPORTANT: Store the OTP verification location
-      setOtpVerificationLocation(location);
-      console.log("📍 OTP verification location stored:", location);
-     
-      setOtpSharedTime(new Date());
-      setRideStatus("started");
-      setOtpModalVisible(false);
-      setEnteredOtp("");
-     
-      console.log("✅ OTP Verified - Starting navigation from OTP verification location to drop");
-     
+
+  
+  const confirmOTP = async () => {
+  if (!ride) return;
+
+  if (!ride.otp) {
+    Alert.alert("Error", "OTP not yet received from server.");
+    return;
+  }
+
+  // Check OTP
+  if (enteredOtp === ride.otp) {
+    console.log("✅ OTP Matched");
+
+    // 1. IMMEDIATE UI UPDATES
+    setOtpModalVisible(false); // Close modal first
+    setEnteredOtp(""); 
+    setRideStatus("started"); // Change status immediately
+    
+    // 2. LOGIC UPDATES
+    setTravelledKm(0);
+    distanceSinceOtp.current = 0;
+    
+    // Use current location as the "Start" point
+    const startPoint = location || lastCoord; 
+    
+    if (startPoint) {
+      lastLocationBeforeOtp.current = startPoint;
+      setOtpVerificationLocation(startPoint);
+      console.log("📍 OTP verification location stored:", startPoint);
+      
+      // Start navigation immediately
       if (ride.drop) {
-        // Start navigation with dynamic route from OTP verification location to drop (RED ROUTE)
-        await startNavigation();
+        startNavigation(startPoint); // Pass location directly
         animateToLocation(ride.drop, true);
       }
+    }
+
+    setOtpSharedTime(new Date());
+
+    // 3. SOCKET EMITS
+    if (socket) {
+      const timestamp = new Date().toISOString();
       
-      if (socket) {
-        socket.emit("otpVerified", {
-          rideId: ride.rideId,
-          driverId: driverId,
-          userId: userData?.userId,
-          timestamp: new Date().toISOString(),
-          driverLocation: location
-        });
-        
-        socket.emit("driverStartedRide", {
-          rideId: ride.rideId,
-          driverId: driverId,
-          userId: userData?.userId,
-          driverLocation: location,
-          otpVerified: true,
-          timestamp: new Date().toISOString()
-        });
-        
-        socket.emit("rideStatusUpdate", {
-          rideId: ride.rideId,
-          status: "started",
-          otpVerified: true,
-          timestamp: new Date().toISOString()
-        });
-      }
-     
-      console.log("📢 Emitted OTP verification events to user");
-     
+      socket.emit("otpVerified", {
+        rideId: ride.rideId,
+        driverId: driverId,
+        userId: userData?.userId,
+        timestamp: timestamp,
+        driverLocation: startPoint
+      });
+
+      socket.emit("driverStartedRide", {
+        rideId: ride.rideId,
+        driverId: driverId,
+        userId: userData?.userId,
+        driverLocation: startPoint,
+        otpVerified: true,
+        timestamp: timestamp
+      });
+      
+      // Force status update on server
+      socket.emit("rideStatusUpdate", {
+        rideId: ride.rideId,
+        status: "started",
+        otpVerified: true,
+        timestamp: timestamp
+      });
+    }
+
+    // 4. SAVE STATE
+    saveRideState();
+
+    // 5. SHOW ALERT (Inside setTimeout to allow UI to refresh first)
+    setTimeout(() => {
       Alert.alert(
         "OTP Verified ✅",
-        "Navigation started. Route will update dynamically as you move.",
-        [{ text: "OK" }]
+        "Ride Started! Navigation to drop location is active.",
+        [
+          { 
+            text: "OK", 
+            onPress: () => console.log("Ride start confirmed by driver") 
+          }
+        ]
       );
-      
-      // Save ride state after OTP verification
-      saveRideState();
-    } else {
-      Alert.alert("Invalid OTP", "Please check the OTP and try again.");
-    }
-  };
+    }, 500);
+
+  } else {
+    Alert.alert("Invalid OTP", "The OTP you entered is incorrect. Please try again.");
+  }
+};
   
 
   
@@ -7548,9 +7578,21 @@ const startLocationUpdates = useCallback(() => {
 
 
 
-  // Update socket event handler for newRideRequest
-socket.on("newRideRequest", (data: any) => {
+socket.on("newRideRequest", async (data: any) => {
   if (!isMounted.current || !data?.rideId || !isDriverOnline) return;
+
+  // ✅ FIX: Normalize both types to UPPERCASE for comparison
+  const storedType = await AsyncStorage.getItem("driverVehicleType");
+  const myDriverType = (storedType || "taxi").trim().toUpperCase();
+  const incomingVehicleType = (data.vehicleType || "").trim().toUpperCase();
+
+  console.log(`🚗 Socket Request: Me=[${myDriverType}] vs Ride=[${incomingVehicleType}]`);
+
+  // Compare case-insensitively
+  if (incomingVehicleType && myDriverType && myDriverType !== incomingVehicleType) {
+    console.log(`🚫 Ignoring ride request: Driver is ${myDriverType}, ride requires ${incomingVehicleType}`);
+    return;
+  }
   
   console.log(`🚗 Received ride request for ${data.vehicleType}`);
   
@@ -8518,54 +8560,7 @@ socket.on("newRideRequest", (data: any) => {
         visible={showVerificationModal}
         onRequestClose={handleVerificationModalClose}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Driver Verified Successfully!</Text>
-              <TouchableOpacity onPress={handleVerificationModalClose}>
-                <MaterialIcons name="close" size={24} color="#666" />
-              </TouchableOpacity>
-            </View>
-           
-            <View style={styles.modalIconContainer}>
-              <FontAwesome name="check-circle" size={60} color="#4CAF50" />
-            </View>
-           
-            <Text style={styles.modalMessage}>
-              Good news! You have successfully verified your driver.
-            </Text>
-           
-            <View style={styles.billDetailsContainer}>
-              <View style={styles.billRow}>
-                <Text style={styles.billLabel}>Pickup location:</Text>
-                <Text style={styles.billValue}>{verificationDetails.pickup}</Text>
-              </View>
-              <View style={styles.billRow}>
-                <Text style={styles.billLabel}>Drop-off location:</Text>
-                <Text style={styles.billValue}>{verificationDetails.dropoff}</Text>
-              </View>
-              <View style={styles.billRow}>
-                <Text style={styles.billLabel}>Time:</Text>
-                <Text style={styles.billValue}>{verificationDetails.time}</Text>
-              </View>
-              <View style={styles.billRow}>
-                <Text style={styles.billLabel}>Speed:</Text>
-                <Text style={styles.billValue}>{verificationDetails.speed.toFixed(2)} km/h</Text>
-              </View>
-              <View style={styles.billRow}>
-                <Text style={styles.billLabel}>Distance:</Text>
-                <Text style={styles.billValue}>{verificationDetails.distance.toFixed(2)} km</Text>
-              </View>
-            </View>
-           
-            <TouchableOpacity
-              style={styles.modalConfirmButton}
-              onPress={handleVerificationModalClose}
-            >
-              <Text style={styles.modalConfirmButtonText}>OK</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        
       </Modal>
       
       {/* Bill Modal */}
