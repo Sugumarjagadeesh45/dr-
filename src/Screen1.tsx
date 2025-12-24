@@ -7535,44 +7535,79 @@ const startNavigation = useCallback(async (startLocation: LocationType) => {
 
   
 
-  const completeRide = async () => {
-  if (!ride || !location || !otpVerificationLocation) return;
-  
-  stopNavigation();
-  
-  try {
-    // Calculate distance and fare
-    const distance = haversine(otpVerificationLocation, location) / 1000;
-    const farePerKm = ride.fare || 15;
-    const finalFare = distance * farePerKm;
+
+
+const completeRide = async () => {
+    console.log("🏁 Attempting to complete ride...");
     
-    // Emit completion event
-    if (socket) {
-      socket.emit("driverCompletedRide", {
-        rideId: ride.rideId,
-        driverId: driverId,
-        userId: userData?.userId,
-        distance: distance,
-        fare: finalFare,
-        actualPickup: otpVerificationLocation,
-        actualDrop: location
-      });
+    // 1. Debugging: Check which value might be missing
+    if (!ride) {
+        console.error("❌ Complete Ride Failed: No Ride Data");
+        Alert.alert("Error", "Ride data is missing.");
+        return;
     }
+    if (!location) {
+        console.error("❌ Complete Ride Failed: No Current Location");
+        Alert.alert("Error", "Current location is missing. Please wait for GPS.");
+        return;
+    }
+
+    // 2. Logic Fix: Don't fail if otpVerificationLocation is missing. Use Pickup as fallback.
+    let startPoint = otpVerificationLocation;
     
-    // Show local bill modal
-    setBillDetails({
-      distance: `${distance.toFixed(2)} km`,
-      travelTime: `${Math.round(distance * 10)} mins`,
-      charge: Math.round(finalFare),
-      userName: userData?.name || 'Customer',
-      userMobile: userData?.mobile || 'N/A'
-    });
-    setShowBillModal(true);
-    
-  } catch (error) {
-    console.error("Error completing ride:", error);
-    Alert.alert("Error", "Failed to complete ride. Please try again.");
-  }
+    if (!startPoint) {
+        console.warn("⚠️ OTP Location missing, falling back to Pickup location");
+        // Ensure ride.pickup matches the LocationType structure
+        startPoint = {
+            latitude: ride.pickup.latitude,
+            longitude: ride.pickup.longitude
+        };
+    }
+
+    // Stop navigation immediately
+    stopNavigation();
+
+    try {
+        // Calculate distance and fare
+        // Use the startPoint (either OTP loc or Pickup loc)
+        const distance = haversine(startPoint, location) / 1000;
+        
+        // Ensure a minimum distance to avoid 0 fare issues if GPS didn't move much
+        const finalDistance = distance > 0 ? distance : 0.1; 
+        
+        const farePerKm = ride.fare || 15;
+        const finalFare = finalDistance * farePerKm;
+
+        console.log(`💰 Calculation: ${finalDistance.toFixed(2)}km * ₹${farePerKm} = ₹${finalFare}`);
+
+        // Emit completion event
+        if (socket) {
+            socket.emit("driverCompletedRide", {
+                rideId: ride.rideId,
+                driverId: driverId,
+                userId: userData?.userId,
+                distance: finalDistance,
+                fare: finalFare,
+                actualPickup: startPoint,
+                actualDrop: location
+            });
+        }
+
+        // Show local bill modal
+        setBillDetails({
+            distance: `${finalDistance.toFixed(2)} km`,
+            travelTime: `${Math.round(finalDistance * 10)} mins`, // Approx time calc
+            charge: Math.round(finalFare),
+            userName: userData?.name || 'Customer',
+            userMobile: userData?.mobile || 'N/A'
+        });
+        
+        setShowBillModal(true);
+
+    } catch (error) {
+        console.error("❌ Error completing ride:", error);
+        Alert.alert("Error", "Failed to complete ride calculation. Please try again.");
+    }
 };
 
 
