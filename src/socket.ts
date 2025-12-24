@@ -1,5 +1,5 @@
 import { io } from "socket.io-client";
-import { SOCKET_URL } from "./apiConfig"; // Import from apiConfig
+import { SOCKET_URL } from "./apiConfig"; 
 
 console.log("🔌 Initializing Socket at:", SOCKET_URL);
 
@@ -11,6 +11,7 @@ const socket = io(SOCKET_URL, {
   reconnectionDelay: 2000,
   timeout: 20000,
   forceNew: true,
+  secure: true, // Added for HTTPS support
 });
 
 export const connectSocket = () => {
@@ -24,9 +25,13 @@ export const connectSocket = () => {
 export default socket;
 
 
-// import { io } from "socket.io-client";
 
-// const SOCKET_URL = "https://ba-lhhs.onrender.com";
+
+
+// import { io } from "socket.io-client";
+// import { SOCKET_URL } from "./apiConfig"; // Import from apiConfig
+
+// console.log("🔌 Initializing Socket at:", SOCKET_URL);
 
 // const socket = io(SOCKET_URL, {
 //   transports: ["websocket"],
@@ -39,7 +44,10 @@ export default socket;
 // });
 
 // export const connectSocket = () => {
-//   if (!socket.connected) socket.connect();
+//   if (!socket.connected) {
+//     console.log("🔌 Connecting socket...");
+//     socket.connect();
+//   }
 //   return socket;
 // };
 
